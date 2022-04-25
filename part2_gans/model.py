@@ -139,6 +139,18 @@ class PreActResBlock(nn.Module):
 
         return res_inputs + inputs
 
+class CalcChannels():
+    def __init__(self, min_ch, max_ch):
+        self.min_ch = min_ch
+        self.max_ch = max_ch
+
+    def up(self, step):
+        curr_ch = self.min_ch * (2**step)
+        return self.max_ch if curr_ch > self.max_ch else curr_ch
+
+    def down(self, step):
+        curr_ch = self.max_ch / (2**step)
+        return self.min_ch if curr_ch < self.min_ch else curr_ch
 
 class Generator(nn.Module):
     """
@@ -179,11 +191,39 @@ class Generator(nn.Module):
                  num_blocks: int,
                  use_class_condition: bool):
         super(Generator, self).__init__()
+
+        calc = CalcChannels(min_channels, max_channels)
+        self.class_cond = use_class_condition
         self.output_size = 4 * 2**num_blocks
-        # TODO
+        self.embeddings = nn.Embedding(num_classes, noise_channels)
+        if self.class_cond:
+            self.embed_lin = nn.utils.spectral_norm(nn.Linear(noise_channels*2, max_channels))
+        else:
+            self.embed_lin = nn.utils.spectral_norm(nn.Linear(noise_channels, max_channels))
+        self.conv_blocks = nn.ModuleList()
+        for i in range(num_blocks - 1):
+            self.conv_blocks.append(nn.utils.spectral_norm(PreActResBlock(calc.down(i), 
+                                                            calc.down(i+1), 
+                                                            noise_channels, 
+                                                            use_class_condition, 
+                                                            True, 
+                                                            False)))
+
+        self.conv_blocks.append(nn.utils.spectral_norm(NormReluConv(calc.down(num_blocks), 3)))
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, noise, labels):
-        # TODO
+        if self.class_cond:
+            class_embeddings = self.embeddings(labels)
+            input_embeddings = torch.cat((class_embeddings, noise), dim = -1)
+        else:
+            input_embeddings = noise
+        
+        input = self.embed_lin(input_embeddings)
+        for layer in self.conv_blocks:
+            input = layer(input)
+        
+        outputs = self.sigmoid(input)
 
         assert outputs.shape == (noise.shape[0], 3, self.output_size, self.output_size)
         return outputs
@@ -226,12 +266,31 @@ class Discriminator(nn.Module):
                  num_blocks: int,
                  use_projection_head: bool):
         super(Discriminator, self).__init__()
-        # TODO
-
+        self.head = use_projection_head
+        calc = CalcChannels(min_channels, max_channels)
+        self.conv_blocks = nn.ModuleList()
+        self.conv_blocks.append(nn.utils.spectral_norm(NormReluConv(calc.up(0), 3)))
+        for i in range(num_blocks - 1):
+            self.conv_blocks.append(nn.utils.spectral_norm(PreActResBlock(calc.up(i), 
+                                                                          calc.up(i+1), 
+                                                                          None, 
+                                                                          False, 
+                                                                          False, 
+                                                                          True)))
+        self.conv_blocks.append(nn.ReLU(calc.up(num_blocks-1), calc.up(num_blocks)))
+        self.conv_blocks.append(torch.nn.AvgPool2d(2, stride=2, divisor_override=1))
+        if self.head:
+            self.embeddings = nn.utils.spectral_norm(nn.Embedding(num_classes, max_channels))
+        self.lin = nn.utils.spectral_norm(nn.Linear(max_channels, 1))
+        
     def forward(self, inputs, labels):
-        pass # TODO
+        for layer in self.conv_blocks:
+            inputs = layer(inputs) 
+        scores = self.lin(scores)
 
-        scores = ... # TODO
+        if self.head:
+            y = self.embeddings(labels)
+            scores += y
 
         assert scores.shape = (inputs.shape[0],)
         return scores

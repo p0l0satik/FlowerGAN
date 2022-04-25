@@ -22,11 +22,19 @@ class GANLoss(nn.Module):
     def forward(self, fake_scores, real_scores=None):
         if real_scores is None:
             # TODO: calculate generator loss (2 points)
-            pass
+            if self.loss_type == "hinge":
+                loss = -np.mean(fake_scores)
+                
+            else:
+                loss = -np.mean(np.log(fake_scores))
 
         else:
             # TODO: calculate discriminator loss (2 points)
-            pass
+            if self.loss_type == "hinge":
+                loss = -(np.mean(np.min(0, -1 + real_scores)) + np.mean(np.min(0, -1 - fake_scores)))
+
+            else:
+                loss = -(np.mean(np.log(real_scores)) + np.mean(np.log(1 - fake_scores)))
 
         return loss
 
@@ -127,11 +135,19 @@ class ValLoss(nn.Module):
 
     @staticmethod
     def calc_fid(real_features, fake_features):
-        return # TODO (2 points)
+        m_r = np.mean(real_features)
+        m_f = np.mean(fake_features)
+
+        cov_r = np.cov(real_features)
+        cov_f = np.cov(fake_features)
+        
+        return linalg.norm(m_r - m_f) + np.trace(cov_r + cov_r + 2*linalg.sqrtm(cov_r @ cov_f)) #(2 points)
 
     @staticmethod
     def calc_is(fake_probs):
-        return # TODO (2 points)
+        p_y = np.mean(fake_probs)
+
+        return np.exp(np.mean(np.sum(fake_probs * np.log(fake_probs / p_y)))) #(2 points)
 
     def forward(self, real_images: list, fake_images: list) -> torch.Tensor:
         real_features, fake_features, fake_probs = self.calc_data(real_images, fake_images)
