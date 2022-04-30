@@ -31,7 +31,7 @@ class GAN(pl.LightningModule):
         lr_gen: float = 1e-4,
         lr_dis: float = 4e-4
     ):
-        super(GAN, self).__init__()
+        super().__init__()
         self.data_path = data_path
         self.noise_channels = 128
         self.class_conditional = class_conditional
@@ -67,7 +67,13 @@ class GAN(pl.LightningModule):
         if self.truncation_trick:
         	# TODO: replace val_noise.data with truncated normal samples 1 (point)
         	# For that, you can use SciPy.stats library
-            pass
+            self.val_noise.data = stats.truncnorm.rvs(-2, 2, size=(len(self.train_dataset), self.noise_channels))
+            # trunc_indices = noise_vector.abs() > 2*truncation
+            # size = torch.count_nonzero(trunc_indices).cpu().numpy()
+            # trunc = 
+            # noise_vector.data[trunc_indices] = 
+            # noise_vector = truncnorm.rvs(-2*truncation, 2*truncation, size=(num_samples_total, noise_size), random_state=state).astype(np.float32) #see https://github.com/tensorflow/hub/issues/214
+            # noise_vector = torch.tensor(noise_vector, requires_grad=False, device='cuda')
 
     def forward(self, noise, labels):
         return self.gen(noise, labels)
@@ -80,7 +86,14 @@ class GAN(pl.LightningModule):
         #   - Forward pass and calculate loss
         # 	  If optimizer_idx == 0: calc gen loss
         # 	  If optimizer_idx == 1: calc dis loss
-        loss = ...
+        noise = torch.randn(len(imgs),self.noise_channels).to(imgs.device)
+        res = self.forward(noise, labels)
+        fake = self.dis(res, labels)
+        if optimizer_idx == 0:
+            loss = self.loss.forward(fake)
+        else:
+            real = self.dis(imgs, labels)
+            loss = self.loss.forward(noise, real)
 
         assert loss.shape == (), 'Loss should be a single digit'
 

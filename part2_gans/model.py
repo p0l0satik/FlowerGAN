@@ -1,5 +1,6 @@
 from tkinter.tix import Tree
 from turtle import forward
+from numpy import pad
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -51,13 +52,14 @@ class NormReluConv(nn.Module):
                  embed_channels: int = None,
                  batchnorm: bool = False):
     super().__init__()
+    # print("conv:", in_channels, out_channels)
     if batchnorm:
         self.bn = AdaptiveBatchNorm(in_channels, embed_channels)
     else:
         self.bn = nn.BatchNorm2d(in_channels)
 
     self.relu = nn.ReLU()
-    self.conv = nn.utils.spectral_norm(nn.Conv2d(in_channels, out_channels, 3))
+    self.conv = nn.utils.spectral_norm(nn.Conv2d(in_channels, out_channels, 3, padding=1))
 
   def forward(self, x, embeds=None):
     if embeds:
@@ -99,12 +101,12 @@ class PreActResBlock(nn.Module):
                  upsample: bool = False,
                  downsample: bool = False):
         super(PreActResBlock, self).__init__()
+        # print("res block", in_channels, out_channels)
         self.apply_conv = False
-        self.up = False
+        self.up = upsample
         self.down = False
         self.module_list = nn.ModuleList()
         if upsample:
-            self.up = True
             self.upsample = nn.UpsamplingNearest2d(scale_factor = 2)
         self.block1 = NormReluConv(in_channels, out_channels, embed_channels, batchnorm)
         self.block2 = NormReluConv(out_channels, out_channels, embed_channels, batchnorm)
@@ -113,8 +115,9 @@ class PreActResBlock(nn.Module):
             self.downsample = nn.AvgPool2d(2)
 
         if in_channels != out_channels:
+
             self.apply_conv = True
-            self.residual_conv = nn.Conv2d(in_channels, in_channels, 1)
+            self.residual_conv = nn.Conv2d(in_channels, out_channels, 1)
 
 
         # TODO: define pre-activation residual block
@@ -124,19 +127,24 @@ class PreActResBlock(nn.Module):
     def forward(self, 
                 inputs, # regular features 
                 embeds=None): # embeds used in adaptive batch norm
-        res_inputs = inputs.copy()
-
-        if self.apply_conv:
-            res_inputs = self.residual_conv(res_inputs)
         if self.up:
             inputs = self.upsample(inputs)
-        
+
+        res_inputs = inputs
+        if self.apply_conv:
+            res_inputs = self.residual_conv(res_inputs)
         inputs = self.block1(inputs, embeds)
+
         inputs = self.block2(inputs, embeds)
+
 
         if self.down:
             inputs = self.downsample(inputs)
+            res_inputs = self.downsample(res_inputs)
 
+        # print("dow", inputs.shape)
+        
+        # print("res_block", res_inputs.shape, inputs.shape)
         return res_inputs + inputs
 
 class CalcChannels():
@@ -146,11 +154,12 @@ class CalcChannels():
 
     def up(self, step):
         curr_ch = self.min_ch * (2**step)
-        return self.max_ch if curr_ch > self.max_ch else curr_ch
+        return int(self.max_ch) if curr_ch > self.max_ch else int(curr_ch)
 
     def down(self, step):
         curr_ch = self.max_ch / (2**step)
-        return self.min_ch if curr_ch < self.min_ch else curr_ch
+        return int(self.min_ch) if curr_ch < self.min_ch else int(curr_ch)
+
 
 class Generator(nn.Module):
     """
@@ -190,42 +199,49 @@ class Generator(nn.Module):
                  num_classes: int,
                  num_blocks: int,
                  use_class_condition: bool):
-        super(Generator, self).__init__()
-
+        super().__init__()
+        self.max_ch = max_channels
+        self.min_ch = min_channels
         calc = CalcChannels(min_channels, max_channels)
         self.class_cond = use_class_condition
         self.output_size = 4 * 2**num_blocks
         self.embeddings = nn.Embedding(num_classes, noise_channels)
         if self.class_cond:
-            self.embed_lin = nn.utils.spectral_norm(nn.Linear(noise_channels*2, max_channels))
+            self.embed_lin = nn.utils.spectral_norm(nn.Linear(noise_channels*2, max_channels*16))
         else:
-            self.embed_lin = nn.utils.spectral_norm(nn.Linear(noise_channels, max_channels))
+            self.embed_lin = nn.utils.spectral_norm(nn.Linear(noise_channels, max_channels*16))
         self.conv_blocks = nn.ModuleList()
-        for i in range(num_blocks - 1):
-            self.conv_blocks.append(nn.utils.spectral_norm(PreActResBlock(calc.down(i), 
-                                                            calc.down(i+1), 
-                                                            noise_channels, 
-                                                            use_class_condition, 
-                                                            True, 
-                                                            False)))
+        for i in range(num_blocks):
+            self.conv_blocks.append(PreActResBlock( calc.down(i), 
+                                                    calc.down(i+1), 
+                                                    noise_channels, 
+                                                    use_class_condition, 
+                                                    True, 
+                                                    False))
 
-        self.conv_blocks.append(nn.utils.spectral_norm(NormReluConv(calc.down(num_blocks), 3)))
+        self.conv_blocks.append(NormReluConv(calc.down(num_blocks), 3))
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, noise, labels):
+
+        # print("forw", noise.shape)
         if self.class_cond:
             class_embeddings = self.embeddings(labels)
             input_embeddings = torch.cat((class_embeddings, noise), dim = -1)
         else:
             input_embeddings = noise
         
-        input = self.embed_lin(input_embeddings)
+        input = self.embed_lin(input_embeddings).reshape((-1, self.max_ch, 4, 4))
+        # print("inp", input.shape)
         for layer in self.conv_blocks:
             input = layer(input)
         
         outputs = self.sigmoid(input)
 
+        # print("outputs", outputs.shape, noise.shape[0], 3, self.output_size, self.output_size)
+
         assert outputs.shape == (noise.shape[0], 3, self.output_size, self.output_size)
+        # print("GEN OK")
         return outputs
 
 
@@ -265,32 +281,37 @@ class Discriminator(nn.Module):
                  num_classes: int,
                  num_blocks: int,
                  use_projection_head: bool):
-        super(Discriminator, self).__init__()
+        super().__init__()
         self.head = use_projection_head
         calc = CalcChannels(min_channels, max_channels)
         self.conv_blocks = nn.ModuleList()
-        self.conv_blocks.append(nn.utils.spectral_norm(NormReluConv(calc.up(0), 3)))
-        for i in range(num_blocks - 1):
-            self.conv_blocks.append(nn.utils.spectral_norm(PreActResBlock(calc.up(i), 
-                                                                          calc.up(i+1), 
-                                                                          None, 
-                                                                          False, 
-                                                                          False, 
-                                                                          True)))
-        self.conv_blocks.append(nn.ReLU(calc.up(num_blocks-1), calc.up(num_blocks)))
-        self.conv_blocks.append(torch.nn.AvgPool2d(2, stride=2, divisor_override=1))
+        self.conv_blocks.append(NormReluConv(3, calc.up(0)))
+        for i in range(num_blocks):
+            self.conv_blocks.append(PreActResBlock(calc.up(i), calc.up(i+1), None, False, False, True))
+        self.conv_blocks.append(nn.ReLU())
+        self.conv_blocks.append(torch.nn.AvgPool2d(4, stride=2, divisor_override=1))
         if self.head:
             self.embeddings = nn.utils.spectral_norm(nn.Embedding(num_classes, max_channels))
-        self.lin = nn.utils.spectral_norm(nn.Linear(max_channels, 1))
+        print(num_classes, max_channels)
+        self.lin = nn.utils.spectral_norm(nn.Linear(max_channels, 1, True))
         
     def forward(self, inputs, labels):
         for layer in self.conv_blocks:
             inputs = layer(inputs) 
-        scores = self.lin(scores)
+            print("shape", inputs.shape)
+
+        # inputs = torch.sum(inputs,  axis=(2, 3))
+        print(inputs.shape)
+        batch_size = inputs.shape[0]
+        scores = self.lin(inputs.squeeze())
+        print(scores.shape)
 
         if self.head:
             y = self.embeddings(labels)
             scores += y
+        scores = scores.squeeze()
+        print(scores.shape)
 
-        assert scores.shape = (inputs.shape[0],)
+        assert scores.shape == (inputs.shape[0],)
+
         return scores

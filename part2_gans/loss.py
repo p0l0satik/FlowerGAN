@@ -16,25 +16,25 @@ class GANLoss(nn.Module):
       - hinge
     """
     def __init__(self, loss_type):
-        super(GANLoss, self).__init__()
+        super().__init__()
         self.loss_type = loss_type
 
     def forward(self, fake_scores, real_scores=None):
         if real_scores is None:
             # TODO: calculate generator loss (2 points)
             if self.loss_type == "hinge":
-                loss = -np.mean(fake_scores)
+                loss = -torch.mean(fake_scores)
                 
             else:
-                loss = -np.mean(np.log(fake_scores))
+                loss = -torch.mean(torch.log(fake_scores))
 
         else:
             # TODO: calculate discriminator loss (2 points)
             if self.loss_type == "hinge":
-                loss = -(np.mean(np.min(0, -1 + real_scores)) + np.mean(np.min(0, -1 - fake_scores)))
+                loss = -(torch.mean(torch.min(0, -1 + real_scores)) + torch.mean(torch.min(0, -1 - fake_scores)))
 
             else:
-                loss = -(np.mean(np.log(real_scores)) + np.mean(np.log(1 - fake_scores)))
+                loss = -(torch.mean(torch.log(real_scores)) + torch.mean(torch.log(1 - fake_scores)))
 
         return loss
 
